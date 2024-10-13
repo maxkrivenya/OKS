@@ -1,4 +1,4 @@
-//#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 #[cfg(target_pointer_width = "64")]
 extern crate native_windows_gui as nwg;
 use std::rc::Rc;
@@ -18,7 +18,24 @@ static TAG_SETS  : &str = "<\n\\S>";
 static TAG_ERR   : &str = "<\n\\E>";
 static TAG_SENT  : &str = "Packages sent:";
 static TAG_RCVD  : &str = "Packages received:";
-                                
+                      
+fn get_avail_ports() -> Vec<String>
+{
+    let avail_ports = serialport::available_ports().expect("No ports found!");
+    let mut avail_port_names = Vec::new();
+    for port in avail_ports {
+        let name = port.port_name.clone();
+        match serialport::new(port.port_name, 9_600).open()
+        {
+            Ok(_) => { avail_port_names.push(name); },
+            _ => {},
+        }
+        
+    }
+    avail_port_names.sort();
+    return avail_port_names;
+}
+                        
 fn next_port(name: &str) -> String
 {
     let (_, num_str) = name.split_at(TAG_COM.len());
@@ -174,9 +191,22 @@ fn port_worker(
                 {
                     'W' =>
                     {
+                        let mut bool_need_to_open = false;
                         let (_, name) = text.split_at(TAG_WRITE.len());
-                        if name == TAG_NONE { port_user_read = None; }
+                        if name == TAG_NONE { port_user_write = None; }
                         else{
+                            match port_user_write
+                            {
+                                Some(ref port) => 
+                                {
+                                    if name != port.name().unwrap() { bool_need_to_open = true; }
+                                },
+                                _ => { bool_need_to_open = true; },
+                            }
+                            
+                        }
+                        if bool_need_to_open == true
+                        {
                             match serialport::new(name, 9_600)
                                              .timeout(Duration::from_millis(10))
                                              .open()
@@ -194,14 +224,27 @@ fn port_worker(
                                 },
                                 _ => { send_error(&tx, "Failed to open port."); },
                             }
-                            
+                        
                         }
                     },
                     'R' =>
                     {
+                        let mut bool_need_to_open = false;
                         let (_, name) = text.split_at(TAG_READ.len());
                         if name == TAG_NONE { port_user_read = None; }
                         else{
+                            match port_user_read
+                            {
+                                Some(ref port) => 
+                                {
+                                    if name != port.name().unwrap() { bool_need_to_open = true; }
+                                },
+                                _ => { bool_need_to_open = true; },
+                            }
+                            
+                        }
+                        if bool_need_to_open == true
+                        {
                             match serialport::new(name, 9_600)
                                              .timeout(Duration::from_millis(10))
                                              .open()
@@ -211,14 +254,15 @@ fn port_worker(
                                     send_settings(&tx, &port);
                                     let name = port.name().unwrap();
                                     port_user_read = Some(port);
+
                                     let mut bld = Builder::default();
                                     bld.append(TAG_READ);
                                     bld.append(name);
                                     _ = tx.send(bld.string().unwrap().as_bytes().to_vec());
-
                                 },
                                 _ => { send_error(&tx, "Failed to open port."); },
-                            } 
+                            }
+                        
                         }
                     },
                     _ =>
@@ -297,12 +341,7 @@ fn main()
     let w_port_avail            = Mutex::new(0);
     let r_port_avail            = Mutex::new(0);
 
-    let avail_ports = serialport::available_ports().expect("No ports found!");
-    let mut avail_port_names = Vec::new();
-    for port in avail_ports {
-        avail_port_names.push(port.port_name);
-    }
-    avail_port_names.sort();
+    let avail_port_names = get_avail_ports();
 /*=====================DIVs=========================*/
 
     nwg::Window::builder()
@@ -688,90 +727,57 @@ fn main()
 
         if &handle == &button_settings
         {
-                    let avail_ports = serialport::available_ports().expect("No ports found!");
-                    let mut avail_port_names = Vec::new();
-                    for port in avail_ports {
-                        avail_port_names.push(port.port_name);
-                    }
-                    //avail_port_names.sort();
-
+                    let mut avail_port_names = get_avail_ports();
                     let current_w_opt = ddlist_w.selection_string();
 
-                    match ddlist_r.selection_string()
+                    match current_w_opt
                     {
-                        Some(p_r_name) =>
+                        Some(ref name) => 
                         {
-			    if p_r_name != TAG_NONE
-			    {
-                                let prev_name = prev_port(&p_r_name);
-                                let mut index;
-                                match avail_port_names.iter().position(|x| *x == p_r_name)
-                                {
-                                    Some(idx) => { index = idx; },
-                                    _ => {index = usize::MAX},
-                                }
-                                if index != usize::MAX { avail_port_names.remove(index); }
-                                match avail_port_names.iter().position(|x| *x == prev_name)
-                                {
-                                    Some(idx) => { index = idx; },
-                                    _ => { index = usize::MAX },
-                                }
-                                if index != usize::MAX { avail_port_names.remove(index); }
-			     }
+                            match avail_port_names.iter().position(|x| x == name)
+                            {
+                                Some(_) => {},
+                                _ => { avail_port_names.push(name.clone()); },
+                            }
+                            ddlist_w.set_selection_string(&name); 
                         },
-                        _ => {},
+                        _ => { },
                     }
                     avail_port_names.push(TAG_NONE.to_string());
                     ddlist_w.set_collection(avail_port_names);
                     ddlist_w.sort();
                     match current_w_opt
                     {
-                        Some(name) => { ddlist_w.set_selection_string(&name); },
-                        _ => { },
+                        Some(ref name) => { ddlist_w.set_selection_string(&name); },
+                        _ => {},
                     }
-
-                    let avail_ports = serialport::available_ports().expect("No ports found!");
-                    let mut avail_port_names = Vec::new();
-                    for port in avail_ports {
-                        avail_port_names.push(port.port_name);
-                    }
-                    avail_port_names.sort();
-
+                    
+                    let mut avail_port_names = get_avail_ports();
                     let current_r_opt = ddlist_r.selection_string();
 
-                    match ddlist_w.selection_string()
+                    match current_r_opt
                     {
-                        Some(p_w_name) =>
+                        Some(ref name) => 
                         {
-			    if p_w_name != TAG_NONE
-			    {
-                                let next_name = next_port(&p_w_name);
-                                let mut index;
-                                match avail_port_names.iter().position(|x| *x == p_w_name)
-                                {
-                                    Some(idx) => { index = idx; },
-                                    _ => { index = usize::MAX; }
-                                }
-                                if index != usize::MAX { avail_port_names.remove(index); }
-                                match avail_port_names.iter().position(|x| *x == next_name)
-                                {
-                                    Some(idx) => { index = idx; },
-                                    _ => { index = usize::MAX; }
-                                }
-                                if index != usize::MAX { avail_port_names.remove(index); }
+                            match avail_port_names.iter().position(|x| x == name)
+                            {
+                                Some(_) => {},
+                                _ => { avail_port_names.push(name.clone()); },
                             }
-			},
-                        _ => {},
+                            ddlist_r.set_selection_string(&name); 
+                        },
+                        _ => { },
                     }
                     avail_port_names.push(TAG_NONE.to_string());
                     ddlist_r.set_collection(avail_port_names);
                     ddlist_r.sort();
                     match current_r_opt
                     {
-                        Some(name) => { ddlist_r.set_selection_string(&name); },
-                        _ => { },
+                        Some(ref name) => { ddlist_r.set_selection_string(&name); },
+                        _ => {},
                     }
         }
+        
             },
             _ =>
             {
