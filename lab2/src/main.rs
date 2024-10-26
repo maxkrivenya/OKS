@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+//#![windows_subsystem = "windows"]
 #[cfg(target_pointer_width = "64")]
 extern crate native_windows_gui as nwg;
 use std::rc::Rc;
@@ -6,20 +6,76 @@ use std::thread;
 use std::time::Duration;
 use std::io::Write;
 use string_builder:: Builder;
+use std::sync::{Mutex};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use stretch::style::Dimension;
 use stretch::geometry::Size;
+
+static PACKAGE_FLAG_1 : char = '@';
+static PACKAGE_FLAG_2 : char = 'u';
+static PACKAGE_FLAG   : &str = "@u";
+static CONST_N   : usize  = 14;
 static TAG_COM   : &str = "COM";
 static TAG_NONE  : &str = "None";
 static TAG_WRITE : &str = "<\n\\W>";
 static TAG_READ  : &str = "<\n\\R>";
-static TAG_SETTINGS  : &str = "<\n\\S>";
+static TAG_SETS  : &str = "<\n\\S>";
 static TAG_ERR   : &str = "<\n\\E>";
-static TAG_WRITE_SUCCESS : &str = "<\n\\w>";
-
 static TAG_SENT  : &str = "Packages sent:";
 static TAG_RCVD  : &str = "Packages received:";
-                      
+  
+fn pack
+(
+    data      : &str,
+    port_num  : u32,
+) 
+-> String
+{
+    if data.len() > CONST_N
+    {
+        return data.len().to_string() + ": INVALID DATA SIZE";
+    }           
+    let mut frame : String = Default::default();
+    frame.push(PACKAGE_FLAG_1);
+    frame.push(PACKAGE_FLAG_2);       
+    frame.push('\0');
+    frame.push(char::from_u32(port_num).expect("INVALID PORT NUMBER"));     /* should match */
+    frame.push_str(&data);
+    frame.push('\0');
+    return frame;
+}
+
+fn unpack
+(
+    package      : String,
+) 
+-> Vec<String>
+{
+    if package.len() < CONST_N + 5
+    {
+        return Vec::new();
+    }           
+    let (flags, rest_no_flags)      = package.split_at(2);
+    let (dest_and_src, rest_data)   = rest_no_flags.split_at(2);
+    let (mut data, fcs)                 = rest_data.split_at(rest_data.len() - 1);
+    let mut result = Vec::new();
+    loop
+    {
+        match data.find(PACKAGE_FLAG)
+        {
+            Some(pos) => 
+            {
+                let (part, rest) = data.split_at(pos);
+                result.push(part.to_string());
+                data = rest;
+            },
+            _ => { result.push(data.to_string()); break; }, 
+        }
+    }
+    println!("msg:{}\nflags:{}\ndest+src:{}\ndata:{}\n fcs:{}\n", package, flags, dest_and_src, data, fcs);
+    return result;
+}
+                    
 fn get_avail_ports() -> Vec<String>
 {
     let mut avail_ports = serialport::available_ports();
@@ -37,10 +93,10 @@ fn get_avail_ports() -> Vec<String>
                 }
 
             }
+            avail_port_names.sort();
         },
         _ => {},
     }
-    avail_port_names.sort();
 
     return avail_port_names;
 }
@@ -83,7 +139,7 @@ fn send_settings(
 ){
 
         let mut bld = Builder::default();
-        bld.append(TAG_SETTINGS);
+        bld.append(TAG_SETS);
         bld.append("Baudwidth:");
         bld.append(port.baud_rate().unwrap().to_string());
         bld.append("\n");
@@ -217,7 +273,7 @@ fn port_worker(
                         if bool_need_to_open == true
                         {
                             match serialport::new(name, 9_600)
-                                             .timeout(Duration::from_millis(10))
+                                             .timeout(Duration::from_millis(1000))
                                              .open()
                             {
                                 Ok(port) =>
@@ -255,7 +311,7 @@ fn port_worker(
                         if bool_need_to_open == true
                         {
                             match serialport::new(name, 9_600)
-                                             .timeout(Duration::from_millis(10))
+                                             .timeout(Duration::from_millis(1000))
                                              .open()
                             {
                                 Ok(port) =>
@@ -280,16 +336,23 @@ fn port_worker(
                         {
                             Some(ref mut port) =>
                             {
-                                match port.write(text.as_bytes())
-                                {
-                                    Ok(_) => 
+                                let mut cur = text.clone();
+                                let port_num = 1;
+                                
+                                while cur.len() > CONST_N {
+                                    let clone = cur.clone();
+                                    let (chunk, rest) = clone.split_at(CONST_N);
+                                    cur = rest.to_string();
+                                    match port.write((pack(&chunk, port_num)).as_bytes())
                                     {
-                                        let mut bld = Builder::default();
-                                        bld.append(TAG_WRITE_SUCCESS);
-                                        bld.append(1);
-                                        _ = tx.send(bld.string().unwrap().as_bytes().to_vec());
-                                    },
-                                    _ => { send_error(&tx, "Failed to write."); },
+                                        Ok(_) => {},
+                                        _ => { send_error(&tx, "Failed to write."); break; },
+                                    }
+                                }
+                                match port.write((pack(&cur, port_num)).as_bytes())
+                                {
+                                    Ok(_) => {},
+                                    _ => { send_error(&tx, "Failed to write."); break; },
                                 }
                             },
                             _ => { send_error(&tx, "Port for writing is invalid");   }
@@ -351,6 +414,9 @@ fn main()
 
     let mut button_settings_w     = Default::default();
     let mut button_settings_r     = Default::default();
+
+    let w_port_avail            = Mutex::new(0);
+    let r_port_avail            = Mutex::new(0);
 
     let avail_port_names = get_avail_ports();
 /*=====================DIVs=========================*/
@@ -432,7 +498,6 @@ fn main()
     nwg::TextBox::builder()
                  .text("")
                  .readonly(true)
-                 .flags(nwg::TextBoxFlags::VISIBLE)
                  .parent(&div_output)
                  .build(&mut textbox_chat)
                  .unwrap()
@@ -536,7 +601,7 @@ fn main()
   
     nwg::TextBox::builder()
                    .parent(&div_input)
-                   .flags(nwg::TextBoxFlags::VISIBLE)
+                   .limit(128)
                    .build(&mut field_input)
                    .unwrap()
     ;
@@ -556,6 +621,20 @@ fn main()
     ;
 
 /*=====================Layouts=========================*/
+ /*
+    nwg::FlexboxLayout::builder()
+                    .parent(&div_settings_button)
+                    .flex_direction(stretch::style::FlexDirection::Column)
+                    .justify_content(stretch::style::JustifyContent::Center)
+                    .child(&label_settings)
+                    .child_size( Size{ width: Dimension::Percent(1.0), height: Dimension::Percent(0.4) })
+                    .child(&button_settings)
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.4) })
+                    .auto_spacing(Some(15))
+                    .build(&layout_settings_button)
+                    .unwrap()
+    ;
+  */
     nwg::FlexboxLayout::builder()
                     .parent(&div_settings_w)
                     .flex_direction(stretch::style::FlexDirection::Column)
@@ -576,6 +655,7 @@ fn main()
                     .child_size( Size{ width: Dimension::Percent(1.0), height: Dimension::Percent(0.1) })
                     .child(&ddlist_r)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.4) })
+//                    .auto_spacing(Some(15))
                     .child(&button_settings_r)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.4) })
                     .build(&layout_settings_read)
@@ -706,16 +786,26 @@ fn main()
             {
                 if &handle == &field_input
                 {
-                    if field_input.text().contains('\n')
+                    if field_input.text().len() > 0
                     {
-                        match tx.send(field_input.text().replace('\n', ""))
+                        match field_input.text().chars().last()
                         {
-                            Ok(_) => {},
+                            Some('\n') => 
+                            {
+                                match tx.send(field_input.text())
+                                {
+                                    Ok(_) =>
+                                    {
+                                        text_bytes_sent.set_text((text_bytes_sent.text().parse::<i32>().unwrap() + 1).to_string().as_str());
+                                        field_input.set_text("");
+                                    },
+                                    _ => {},
+                                }
+                            },
                             _ => {},
                         }
-                    }                            
+                    }
                 }
-                
             
             },
             E::OnButtonClick =>
@@ -835,18 +925,18 @@ fn main()
                 match rx.try_recv()
                 {
                     Ok(bytes) => 
-                    {
+                    {       
                         let mut msg_type = 'M';
-                        let text = &String::from_utf8(bytes.to_vec()).expect("Our bytes should be valid utf8");
+                        let text = & mut String::from_utf8(bytes.to_vec()).expect("Our bytes should be valid utf8");
                         if text.starts_with(TAG_WRITE) { msg_type = 'W'; }
                         if text.starts_with(TAG_READ) { msg_type = 'R'; }
-                        if text.starts_with(TAG_SETTINGS) { msg_type = 'S'; }
-                        if text.starts_with(TAG_WRITE_SUCCESS) { msg_type = 'w'; }
+                        if text.starts_with(TAG_SETS) { msg_type = 'S'; }
                         if text.starts_with(TAG_ERR) == true { msg_type = 'E'; }
                         match msg_type
                         {
                             'W' =>
                             {   
+                                *(w_port_avail.lock().unwrap()) = 1;
                                 let (_, p_w_name) = text.split_at(TAG_WRITE.len());
                                 let mut index;
                                         
@@ -866,14 +956,9 @@ fn main()
                                 if index != usize::MAX { ddlist_r.remove(index); }
                                 
                             },
-                            'w' =>
-                            {
-                                field_input.clear();
-                                text_bytes_sent.set_text((text_bytes_sent.text().parse::<i32>().unwrap() + 1).to_string().as_str());
-
-                            },
                             'R' =>
                             {
+                                *(r_port_avail.lock().unwrap()) = 1;
                                 let (_, p_r_name) = text.split_at(TAG_READ.len());
                                 let mut index;
 
@@ -894,7 +979,7 @@ fn main()
                             },
                             'S' =>
                             {
-                                let (_, settings_local) = text.split_at(TAG_SETTINGS.len());
+                                let (_, settings_local) = text.split_at(TAG_SETS.len());
                                 textbox_settings.clear();
                                 textbox_settings.append(settings_local);
 
@@ -910,9 +995,13 @@ fn main()
                             },
                             _ =>
                             {
-                                textbox_chat.set_text(&text);
-
-                                let rcvd =  text_bytes_rcvd.text().parse::<i32>().unwrap() as i32 + 1;
+                                let mut rcvd =  text_bytes_rcvd.text().parse::<i32>().unwrap() as i32;
+                                let unpacked = unpack((*text).clone());
+                                for package in unpacked
+                                {
+                                    textbox_chat.appendln(&package);
+                                    rcvd = rcvd + 1;                                
+                                }
                                 text_bytes_rcvd.set_text(rcvd.to_string().as_str());
                             },
                         }
@@ -922,7 +1011,7 @@ fn main()
                 }   
             },
         }
-    });                                               
+    });
     nwg::dispatch_thread_events();
     nwg::unbind_event_handler(&handler);
 }

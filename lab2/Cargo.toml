@@ -1,0 +1,11 @@
+[package]
+name = "lab1"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+indexlist = "0.1.0"
+native-windows-gui = "1.0.13"
+serialport = "4.5.0"
+stretch = "0.3.2"
+string-builder = "0.2.0"
