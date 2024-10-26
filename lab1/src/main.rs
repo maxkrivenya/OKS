@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+//#![windows_subsystem = "windows"]
 #[cfg(target_pointer_width = "64")]
 extern crate native_windows_gui as nwg;
 use std::rc::Rc;
@@ -691,7 +691,7 @@ fn main()
     {
 
         use nwg::Event as E;
-        
+
         match evt {
             E::OnWindowClose => 
             { 
@@ -702,21 +702,18 @@ fn main()
                 if &handle == &ddlist_w { _ = tx.send(TAG_WRITE.to_string() + &(ddlist_w.selection_string().unwrap())); }
                 if &handle == &ddlist_r { _ = tx.send(TAG_READ.to_string()  + &(ddlist_r.selection_string().unwrap())); }            
             },
-            E::OnTextInput => 
+            E::OnKeyPress =>
             {
-                if &handle == &field_input
+                if _evt_data.on_key() == 0x0D
                 {
-                    if field_input.text().contains('\n')
-                    {
-                        match tx.send(field_input.text().replace('\n', ""))
+                    if field_input.text().len() > 0 {
+                        match tx.send(field_input.text())
                         {
                             Ok(_) => {},
                             _ => {},
                         }
-                    }                            
+                    }
                 }
-                
-            
             },
             E::OnButtonClick =>
             {
@@ -918,8 +915,19 @@ fn main()
                         }
                     },
                     _ => 
-                    {},
-                }   
+                    {
+                    },
+                }
+                    
+                match field_input.text().find(|c| c as i32 == 13 || c as i32 == 10)
+                {
+                    Some(idx) => 
+                    {
+                        let mut str = field_input.text();
+                        str.remove(idx);
+                        field_input.set_text(&str);
+                    }, _ => {},
+                }                  
             },
         }
     });                                               
