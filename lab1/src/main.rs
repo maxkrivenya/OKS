@@ -1,4 +1,4 @@
-//#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 #[cfg(target_pointer_width = "64")]
 extern crate native_windows_gui as nwg;
 use std::rc::Rc;
@@ -17,8 +17,8 @@ static TAG_SETTINGS  : &str = "<\n\\S>";
 static TAG_ERR   : &str = "<\n\\E>";
 static TAG_WRITE_SUCCESS : &str = "<\n\\w>";
 
-static TAG_SENT  : &str = "Packages sent:";
-static TAG_RCVD  : &str = "Packages received:";
+static TAG_SENT  : &str = "Portions sent:";
+//static TAG_RCVD  : &str = "Portions received:";
                       
 fn get_avail_ports() -> Vec<String>
 {
@@ -29,13 +29,7 @@ fn get_avail_ports() -> Vec<String>
         Ok(ref mut ports) =>
         {
             for port in ports {
-                let name = port.port_name.clone();
-                match serialport::new(port.port_name.clone(), 9_600).open()
-                {
-                    Ok(_) => { avail_port_names.push(name); },
-                    _ => {},
-                }
-
+                if serialport::new(port.port_name.clone(), 9_600).open().is_ok(){ avail_port_names.push(port.port_name.clone()); }
             }
         },
         _ => {},
@@ -178,11 +172,11 @@ fn port_worker(
             {
                 if port.bytes_to_read().unwrap() > 0
                 {
-                    let mut serial_buf = vec![0; 128];
+                    let mut serial_buf = vec![0; 1024];
                     match port.read(serial_buf.as_mut_slice())
                     {
-                        Ok(_) => { _ = tx.send(serial_buf.clone()); },
-                        _ =>     { _ = tx.send("ERROR: failed to read".as_bytes().to_vec()); },
+                        Ok(_) => { _ = tx.send(serial_buf); },
+                        _ =>     { send_error(&tx, "ERROR: failed to read"); },
                     }
                 }
             },
@@ -314,14 +308,12 @@ fn main()
     let mut label_state         = Default::default();
     let mut label_settings      = Default::default();
     let mut label_sent          = Default::default();
-    let mut label_rcvd          = Default::default();
     let mut label_output        = Default::default();
     let mut label_input         = Default::default();
     let mut label_settings_write = Default::default();
     let mut label_settings_read  = Default::default();
 
-    let mut text_bytes_sent     = Default::default();
-    let mut text_bytes_rcvd     = Default::default();
+    let mut text_packages_sent     = Default::default();
     
     let mut field_input         = Default::default();
 
@@ -359,6 +351,7 @@ fn main()
                 .size((920, 600))
                 .position((0, 0))
                 .title("Lab1")
+                .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
                 .build(&mut window_main)
                 .unwrap()
     ;
@@ -510,28 +503,10 @@ fn main()
                  .readonly(true)
                  .focus(true)
                  .parent(&div_state_col)
-                 .build(&mut text_bytes_sent)
+                 .build(&mut text_packages_sent)
                  .unwrap()
     ;
 
-    nwg::Label::builder()
-                 .parent(&div_state_col)
-                 .text(TAG_RCVD)
-                 .h_align(nwg::HTextAlign::Center)
-                 .build(&mut label_rcvd)
-                 .unwrap()
-    ;
-
-    nwg::TextBox::builder()
-                 .text("")
-                 .flags(nwg::TextBoxFlags::VISIBLE)
-                 .readonly(true)
-                 .focus(true)
-                 .text("0")
-                 .parent(&div_state_col)
-                 .build(&mut text_bytes_rcvd)
-                 .unwrap()
-    ;
 /*=====================UI elements=========================*/
   
     nwg::TextBox::builder()
@@ -601,9 +576,9 @@ fn main()
                     .flex_direction(stretch::style::FlexDirection::Column)
                     .justify_content(stretch::style::JustifyContent::Center)
                     .child(&label_sent)
-                    .child(&text_bytes_sent)
-                    .child(&label_rcvd)
-                    .child(&text_bytes_rcvd)
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
+                    .child(&text_packages_sent)
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
                     .build(&layout_state_col)
                     .unwrap()
     ;
@@ -706,13 +681,7 @@ fn main()
             {
                 if _evt_data.on_key() == 0x0D
                 {
-                    if field_input.text().len() > 0 {
-                        match tx.send(field_input.text())
-                        {
-                            Ok(_) => {},
-                            _ => {},
-                        }
-                    }
+                    _ = tx.send(field_input.text());
                 }
             },
             E::OnButtonClick =>
@@ -732,7 +701,6 @@ fn main()
                                 Some(_) => {},
                                 _ => { avail_port_names.push(name.clone()); },
                             }
-                            ddlist_w.set_selection_string(&name); 
                         },
                         _ => { },
                     }
@@ -835,7 +803,7 @@ fn main()
                     {
                         let mut msg_type = 'M';
                         let text = &String::from_utf8(bytes.to_vec()).expect("Our bytes should be valid utf8");
-                        if text.starts_with(TAG_WRITE) { msg_type = 'W'; }
+			if text.starts_with(TAG_WRITE) { msg_type = 'W'; }
                         if text.starts_with(TAG_READ) { msg_type = 'R'; }
                         if text.starts_with(TAG_SETTINGS) { msg_type = 'S'; }
                         if text.starts_with(TAG_WRITE_SUCCESS) { msg_type = 'w'; }
@@ -866,7 +834,7 @@ fn main()
                             'w' =>
                             {
                                 field_input.clear();
-                                text_bytes_sent.set_text((text_bytes_sent.text().parse::<i32>().unwrap() + 1).to_string().as_str());
+                                text_packages_sent.set_text((text_packages_sent.text().parse::<i32>().unwrap() + 1).to_string().as_str());
 
                             },
                             'R' =>
@@ -906,28 +874,13 @@ fn main()
                                 );
                             },
                             _ =>
-                            {
-                                textbox_chat.set_text(&text);
-
-                                let rcvd =  text_bytes_rcvd.text().parse::<i32>().unwrap() as i32 + 1;
-                                text_bytes_rcvd.set_text(rcvd.to_string().as_str());
-                            },
+                            { textbox_chat.set_text(&text); },
                         }
                     },
                     _ => 
                     {
                     },
-                }
-                    
-                match field_input.text().find(|c| c as i32 == 13 || c as i32 == 10)
-                {
-                    Some(idx) => 
-                    {
-                        let mut str = field_input.text();
-                        str.remove(idx);
-                        field_input.set_text(&str);
-                    }, _ => {},
-                }                  
+                }      
             },
         }
     });                                               
