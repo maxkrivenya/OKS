@@ -72,9 +72,13 @@ fn implement_error(s: & mut str)
     let num = rand::thread_rng().gen_range(1..101);
     if num < 40
     {
-        let num : usize = rand::thread_rng().gen_range(1..str.len());
-        let c = char::from(rand::thread_rng().gen_range(0..255));
-        str = replace_nth_char_safe(&str, num, c);
+        let num : usize = rand::thread_rng().gen_range(0..str.len());
+        let sh : u8 = rand::thread_rng().gen_range(0..8);
+        let c = str.chars().nth(num).unwrap();
+        let mut u = c as u8;
+        u = u ^ (u & POW2[usize::from(sh)]);    
+        println!("{}/{}", c, char::from(u));
+        str = replace_nth_char_safe(&str, num, char::from(u));
     }
     return str;
 }
