@@ -1,4 +1,4 @@
-//#![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 #[cfg(target_pointer_width = "64")]
 extern crate native_windows_gui as nwg;
 use std::rc::Rc;
@@ -20,13 +20,13 @@ static TAG_ERR   : &str = "<\n\\E>";
 static TAG_PACKAGE   : &str = "<\n\\P>";
 static TAG_WRITE_SUCCESS : &str = "<\n\\w>";
 
-static TAG_SENT  : &str = "Sent:";
-static TAG_RCVD  : &str = "Received:";
+static TAG_SENT  : &str = "Packages sent:";
 
 static PACKAGE_FLAG_1 : char = '@';
 static PACKAGE_FLAG_2 : char = 'u';
 static PACKAGE_FLAG   : &str = "@u";
-static CONST_N   : usize  = 14;  
+static CONST_N   : usize  = 14; 
+static PACKAGE_FLAG_REPLACER : &str = "\n?"; 
 
 fn pack_single
 (
@@ -51,8 +51,7 @@ fn pack(
 ) -> (String, i32, String)
 {
 
-    let replacer = "\n?t";
-    let replaced = &data.replace(PACKAGE_FLAG, replacer);
+    let replaced = &data.replace(PACKAGE_FLAG, PACKAGE_FLAG_REPLACER);
     use std::str;
     let subs = replaced.as_bytes()
         .chunks(CONST_N)
@@ -71,7 +70,6 @@ fn pack(
         bld.append(package.clone());
     }
     let res = bld.string().unwrap();
-    println!("chunk: '{}'", &res);
     return (res, amt, package);
 }
 
@@ -85,9 +83,9 @@ fn unpack_single
     {
         return String::new();
     }
-    let (dest_and_src, rest_data)   = package.split_at(2);
-    let (data_str, fcs)             = rest_data.split_at(rest_data.len() - 1);
-    let data = data_str.replace("\n?t", PACKAGE_FLAG);
+    let (_dest_and_src, rest_data)   = package.split_at(2);
+    let (data_str, _fcs)             = rest_data.split_at(rest_data.len() - 1);
+    let data = data_str.replace(PACKAGE_FLAG_REPLACER, PACKAGE_FLAG);
     return data;
 }
 
@@ -102,7 +100,6 @@ fn unpack
         return Vec::new();
     }
 
-    println!("msg: '{}'", package);
     let packages : Vec<_> = package.split(PACKAGE_FLAG).filter(|s| !s.is_empty()).collect();
     let mut data = Vec::new();
 
@@ -126,7 +123,7 @@ fn get_avail_ports() -> Vec<String>
         Ok(ref mut ports) =>
         {
             for port in ports {
-                if serialport::new(port.port_name.clone(), 9_600).open().is_ok(){ avail_port_names.push(port.port_name.clone()); }
+                if serialport::new(&port.port_name, 9_600).open().is_ok(){ avail_port_names.push(port.port_name.clone()); }
             }
         },
         _ => {},
@@ -269,11 +266,11 @@ fn port_worker(
             {
                 if port.bytes_to_read().unwrap() > 0
                 {
-                    let mut serial_buf = vec![0; 4096];
+                    let mut serial_buf = vec![0; 1024];
                     match port.read(serial_buf.as_mut_slice())
                     {
-                        Ok(_) => { _ = tx.send(serial_buf.clone()); },
-                        _ =>     { _ = tx.send("ERROR: failed to read".as_bytes().to_vec()); },
+                        Ok(_) => { _ = tx.send(serial_buf); },
+                        _ =>     { send_error(&tx, "ERROR: failed to read"); },
                     }
                 }
             },
@@ -308,7 +305,7 @@ fn port_worker(
                         if bool_need_to_open == true
                         {
                             match serialport::new(name, 9_600)
-                        .timeout(Duration::from_millis(10))
+                                             .timeout(Duration::from_millis(10))
                                              .open()
                             {
                                 Ok(port) =>
@@ -346,7 +343,7 @@ fn port_worker(
                         if bool_need_to_open == true
                         {
                             match serialport::new(name, 9_600)
-                         .timeout(Duration::from_millis(10))
+                                             .timeout(Duration::from_millis(10))
                                              .open()
                             {
                                 Ok(port) =>
@@ -376,7 +373,17 @@ fn port_worker(
                                 let port_num = port_num_str.parse::<u32>().unwrap();
 
                                 let (msg, amt, frame) = pack(&text, port_num);
-                                _ = tx.send((TAG_PACKAGE.to_string() + &frame).as_bytes().to_vec());
+                                let hex : &String = &frame.as_bytes().to_hex().chars()
+                                                                            .collect::<Vec<_>>() // Collect characters into a vector
+                                                                            .chunks(2) // Split the vector into chunks of 2
+                                                                            .map(|chunk| chunk.iter().collect::<String>()) // Collect each chunk back into a String
+                                                                            .collect::<Vec<_>>() // Collect all the chunks into a vector
+                                                                            .join(" ") // Join the chunks with a space
+				;
+                                let hex_replaced = hex.replace("0a 3f", "[0a 3f]");
+
+                                _ = tx.send((TAG_PACKAGE.to_string() + &hex_replaced).as_bytes().to_vec());
+
                                 match port.write(msg.as_bytes())
                                 {
                                     Ok(_) => 
@@ -454,7 +461,7 @@ fn main()
 /*=====================DIVs=========================*/
 
     nwg::Window::builder()
-                .size((1280, 640))
+                .size((920, 600))
                 .position((0, 0))
                 .title("Lab2")
                 .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
@@ -462,6 +469,17 @@ fn main()
                 .unwrap()
     ;
 
+
+    let mut font = nwg::Font::default();
+
+    nwg::Font::builder()
+        .size(20)
+        .family("Segoe UI")
+        .weight(500)
+        .build(&mut font)
+	.unwrap()
+    ;
+    _ = nwg::Font::set_global_default(Some(font));
     /*==========DIV==============*/
 
     nwg::Frame::builder()
@@ -560,7 +578,7 @@ fn main()
                  .h_align(nwg::HTextAlign::Center)              
                  .text("State")
                  .parent(&div_state)
-                 .build(&mut label_state)
+		 .build(&mut label_state)
                  .unwrap()
     ;
 
@@ -575,7 +593,7 @@ fn main()
 
     nwg::Label::builder()
                  .h_align(nwg::HTextAlign::Center)              
-                 .text("Package structure:")
+                 .text("Package structure (hex):")
                  .parent(&div_state_col)
                  .build(&mut label_package)
                  .unwrap()
@@ -703,7 +721,7 @@ fn main()
                     .child(&label_sent)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
                     .child(&text_packages_sent)
-                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.3) })
                     .child(&text_packages_sent)
                     .child(&label_package)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.1) })
@@ -812,7 +830,7 @@ fn main()
             {
                 if _evt_data.on_key() == 0x0D
                 {
-            _ = tx.send(field_input.text() + "\n");
+                    _ = tx.send(field_input.text());
                 }
             },
             E::OnButtonClick =>
@@ -823,53 +841,36 @@ fn main()
                     let mut avail_port_names = get_avail_ports();
                     let current_w_opt = ddlist_w.selection_string();
 
-                    match current_w_opt
-                    {
-                        Some(ref name) => 
-                        {
-                            match avail_port_names.iter().position(|x| x == name)
-                            {
-                                Some(_) => {},
-                                _ => { avail_port_names.push(name.clone()); },
-                            }
-                        },
-                        _ => { },
-                    }
                     match ddlist_r.selection_string()
                     {
                         Some(ref name) => 
                         {
                             if name != TAG_NONE {
-                                let mut index = usize::MAX;
-
                                 let prev = prev_port(&name);
                                 match avail_port_names.iter().position(|x| *x == prev)
                                 {
-                                    Some(idx) => { index = idx; },
+                                    Some(idx) => { avail_port_names.remove(idx); },
                                     _ => {},
                                 }
-                                if index != usize::MAX { avail_port_names.remove(index); }
                             }
                         },
                         _ => {},
                     }
 
                     avail_port_names.push(TAG_NONE.to_string());
-                    ddlist_w.set_collection(avail_port_names.clone());
-                    ddlist_w.sort();
+                    ddlist_w.set_collection(avail_port_names);
+       
                     match current_w_opt
                     {
-                        Some(ref name) => { 
-                            let mut index = usize::MAX;
-                            match avail_port_names.iter().position(|x| x == name)
-                            {
-                                Some(idx) => { index = idx; },
-                                _ => {},
-                            }
-                            if index != usize::MAX{ ddlist_w.set_selection_string(&name); }
-                        },
-                        _ => {},
-                    }
+                        Some(ref name) => 
+                        {
+                            ddlist_w.push(name.clone());
+			    ddlist_w.sort();
+                            ddlist_w.set_selection_string(&name);
+ 			}, 
+		        _ => {},
+		    }
+
                 }
                 if &handle == &button_settings_r
                 {
@@ -945,19 +946,18 @@ fn main()
                             'W' =>
                             {   
                                 let (_, p_w_name) = text.split_at(TAG_WRITE.len());
-                                let mut index;
-                                        
+                                let mut index = usize::MAX;        
                                 match ddlist_r.collection().iter().position(|r| *r == p_w_name)
                                 {
                                     Some(idx) => { index = idx; },
-                                    _ => { index = usize::MAX; },
+				    _ => {},
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
                                 
                                 let name_next = next_port(p_w_name);
                                 match ddlist_r.collection().iter().position(|r| *r == name_next)
                                 {
-                                    Some(idx) => { index = idx; },
+				    Some(idx) => { index = idx; }
                                     _ => { index = usize::MAX; },
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
@@ -1011,9 +1011,7 @@ fn main()
                             {
                                 textbox_package.clear();
                                 let (_, pkg) = text.split_at(TAG_PACKAGE.len());
-                                let hex = &pkg.as_bytes().to_hex();
-                                let hex_replaced = hex.replace("0a3f74", "[0a3f74]");
-                                textbox_package.append(&hex_replaced);                            
+                                textbox_package.append(&pkg);                            
                             }
                             _ =>
                             {
@@ -1022,7 +1020,6 @@ fn main()
 
                                 for package in unpacked
                                 {
-                                    println!("data: '{}'", package);
                                     textbox_chat.append(&package);
                                 }
                             },
@@ -1031,19 +1028,18 @@ fn main()
                     _ => 
                     {
                     },
-                }
-                    
-                match field_input.text().find(|c| c as i32 == 13 || c as i32 == 10)
-                {
-                    Some(idx) => 
-                    {
-                        let mut str = field_input.text();
-                        str.remove(idx);
-                        field_input.set_text(&str);
-                    }, _ => {},
-                }                  
+                }      
             },
         }
+        match field_input.text().find(|c| c as i32 == 13 || c as i32 == 10)
+        {
+            Some(idx) => 
+            {
+                let mut str = field_input.text();
+                str.remove(idx);
+                field_input.set_text(&str);
+            }, _ => {},
+        }  
     });                                               
     nwg::dispatch_thread_events();
     nwg::unbind_event_handler(&handler);

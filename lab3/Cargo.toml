@@ -1,5 +1,5 @@
 [package]
-name = "lab2"
+name = "lab3"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +7,7 @@ edition = "2021"
 crypto = "0.5.1"
 indexlist = "0.1.0"
 native-windows-gui = "1.0.13"
+rand = "0.8.5"
 rustc-serialize = "0.3.25"
 serialport = "4.5.0"
 stretch = "0.3.2"

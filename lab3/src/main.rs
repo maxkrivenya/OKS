@@ -9,16 +9,163 @@ use string_builder:: Builder;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use stretch::style::Dimension;
 use stretch::geometry::Size;
+use rustc_serialize::hex::ToHex;
+use rand::Rng;
+
 static TAG_COM   : &str = "COM";
 static TAG_NONE  : &str = "None";
 static TAG_WRITE : &str = "<\n\\W>";
 static TAG_READ  : &str = "<\n\\R>";
 static TAG_SETTINGS  : &str = "<\n\\S>";
 static TAG_ERR   : &str = "<\n\\E>";
+static TAG_PACKAGE   : &str = "<\n\\P>";
 static TAG_WRITE_SUCCESS : &str = "<\n\\w>";
 
-static TAG_SENT  : &str = "Portions sent:";
-                      
+static TAG_SENT  : &str = "Packages sent:";
+
+static PACKAGE_FLAG_1 : char = '@';
+static PACKAGE_FLAG_2 : char = 'u';
+static PACKAGE_FLAG   : &str = "@u";
+static CONST_N   : usize  = 14; 
+static PACKAGE_FLAG_REPLACER : &str = "\n?"; 
+
+
+static POW2     : [u8; 8] = [128,64,32,16,8,4,2,1];
+
+fn calc_hamming(str: &str) 
+-> u8
+{
+    let mut res : u8 = 0;
+    let n = str.len();
+    for char_index in 0..n
+    {
+        let idx : u8 = (char_index * 8).try_into().unwrap();
+        let c = str.chars().nth(char_index).unwrap() as u8;
+        for bit_pos in 0..8
+        {    
+            for pow_pos in 0..8
+            {
+                if (idx + bit_pos + 1) & POW2[pow_pos] > 0
+                {
+                    let us_bit_pos = usize::from(bit_pos);                    
+                    let us_pow_pos = usize::from(pow_pos);
+                    if (c & POW2[us_bit_pos]) > 0
+                    {
+                        res = res ^ POW2[us_pow_pos];
+                    }
+                }
+            }
+        }
+
+    }
+    res
+}
+
+fn replace_nth_char_safe(s: &str, idx: usize, newchar: char) -> String {
+    s.chars().enumerate().map(|(i,c)| if i == idx { newchar } else { c }).collect()
+}
+
+fn implement_error(s: & mut str)
+-> String
+{
+    let mut str = s.to_string();
+    let num = rand::thread_rng().gen_range(1..101);
+    if num < 40
+    {
+        let num : usize = rand::thread_rng().gen_range(1..str.len());
+        let c = char::from(rand::thread_rng().gen_range(0..255));
+        str = replace_nth_char_safe(&str, num, c);
+    }
+    return str;
+}
+
+fn pack_single
+(
+    data      : String,
+    port_num  : u32,
+) 
+-> String
+{
+    let mut s = data.clone();
+    let mut frame : String = Default::default();
+    frame.push(PACKAGE_FLAG_1);
+    frame.push(PACKAGE_FLAG_2);       
+    frame.push('\0');
+    frame.push(char::from_u32(port_num).expect("INVALID PORT NUMBER"));     /* should match */
+    frame.push_str(&implement_error(& mut s));
+    frame.push(char::from(calc_hamming(&data)));
+    return frame;
+}
+
+fn pack(
+    data      : &str,
+    port_num  : u32,
+) -> (String, i32, String)
+{
+
+    let replaced = &data.replace(PACKAGE_FLAG, PACKAGE_FLAG_REPLACER);
+    use std::str;
+    let subs = replaced.as_bytes()
+        .chunks(CONST_N)
+        .map(str::from_utf8)
+        .collect::<Result<Vec<&str>, _>>()
+        .unwrap()
+    ;
+    
+    let mut bld = Builder::default();
+    let mut amt = 0;
+    let mut package = String::new();
+    for chunk in subs.iter()
+    {
+        amt = amt + 1;
+        package = pack_single(chunk.to_string(), port_num);
+        bld.append(package.clone());
+    }
+    let res = bld.string().unwrap();
+    return (res, amt, package);
+}
+
+fn unpack_single
+(
+    package      : String,
+) 
+-> String
+{
+    if package.len() < 3
+    {
+        return String::new();
+    }
+    let (_dest_and_src, rest_data)   = package.split_at(2);
+    let (data_str, _fcs)             = rest_data.split_at(rest_data.len() - 1);
+    let data = data_str.replace(PACKAGE_FLAG_REPLACER, PACKAGE_FLAG);
+    return data;
+}
+
+fn unpack
+(
+    package      : String,
+) 
+-> Vec<String>
+{
+    if package.len() < CONST_N + 5
+    {
+        return Vec::new();
+    }
+
+    let packages : Vec<_> = package.split(PACKAGE_FLAG).filter(|s| !s.is_empty()).collect();
+    let mut data = Vec::new();
+
+    for p in packages
+    {
+        let data_str = unpack_single(p.to_string());
+        data.push(data_str);
+    }
+
+    return data;
+}
+
+
+                    
 fn get_avail_ports() -> Vec<String>
 {
     let mut avail_ports = serialport::available_ports();
@@ -83,7 +230,18 @@ fn send_settings(
         bld.append("Databits:");
         match port.data_bits()
         {
-            Ok(t) => { bld.append(u8::from(t).to_string()); },
+            Ok(t) => 
+            {
+                use serialport::DataBits as spdb;
+                match t
+                {
+                    spdb::Five  => bld.append("5"),
+                    spdb::Six   => bld.append("6"),
+                    spdb::Seven => bld.append("7"),
+                    spdb::Eight => bld.append("8"),
+
+                }
+            },
             _ => bld.append("error"),
         }
         bld.append("\n");
@@ -262,13 +420,29 @@ fn port_worker(
                         {
                             Some(ref mut port) =>
                             {
-                                match port.write(text.as_bytes())
+                                let port_name = port.name().unwrap();
+                                let (_, port_num_str) = port_name.split_at(TAG_COM.len());
+                                let port_num = port_num_str.parse::<u32>().unwrap();
+
+                                let (msg, amt, frame) = pack(&text, port_num);
+                                let hex : &String = &frame.as_bytes().to_hex().chars()
+                                                                            .collect::<Vec<_>>() // Collect characters into a vector
+                                                                            .chunks(2) // Split the vector into chunks of 2
+                                                                            .map(|chunk| chunk.iter().collect::<String>()) // Collect each chunk back into a String
+                                                                            .collect::<Vec<_>>() // Collect all the chunks into a vector
+                                                                            .join(" ") // Join the chunks with a space
+                ;
+                                let hex_replaced = hex.replace("0a 3f", "[0a 3f]");
+
+                                _ = tx.send((TAG_PACKAGE.to_string() + &hex_replaced).as_bytes().to_vec());
+
+                                match port.write(msg.as_bytes())
                                 {
                                     Ok(_) => 
                                     {
                                         let mut bld = Builder::default();
                                         bld.append(TAG_WRITE_SUCCESS);
-                                        bld.append(1);
+                                        bld.append(amt.to_string());
                                         _ = tx.send(bld.string().unwrap().as_bytes().to_vec());
                                     },
                                     _ => { send_error(&tx, "Failed to write."); },
@@ -284,8 +458,22 @@ fn port_worker(
     }
 }
 
+
+fn print_binary(name: String)
+{
+    let mut name_in_binary = "".to_string();
+
+    // Call into_bytes() which returns a Vec<u8>, and iterate accordingly
+    // I only called clone() because this for loop takes ownership
+    for character in name.clone().into_bytes() {
+        name_in_binary += &format!("0{:b} ", character);
+    }
+    println!("Binary: '{}'", name_in_binary);
+}
+
 fn main()
-{    
+{ 
+
     nwg::init().expect("Failed to init Native Windows GUI");
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
 
@@ -296,6 +484,7 @@ fn main()
     let mut label_state         = Default::default();
     let mut label_settings      = Default::default();
     let mut label_sent          = Default::default();
+    let mut label_package       = Default::default();
     let mut label_output        = Default::default();
     let mut label_input         = Default::default();
     let mut label_settings_write = Default::default();
@@ -305,8 +494,10 @@ fn main()
     
     let mut field_input         = Default::default();
 
+    let mut textbox_package     = Default::default();
+
     let mut window_main         = Default::default();
-    let mut field_output        = Default::default();    
+    let mut textbox_chat        = Default::default();    
     let     layout              = Default::default();
 
     let mut div_input           = Default::default();
@@ -338,11 +529,12 @@ fn main()
     nwg::Window::builder()
                 .size((920, 600))
                 .position((0, 0))
-                .title("Lab1")
+                .title("Lab2")
                 .flags(nwg::WindowFlags::WINDOW | nwg::WindowFlags::VISIBLE)
                 .build(&mut window_main)
                 .unwrap()
     ;
+
 
     let mut font = nwg::Font::default();
 
@@ -351,7 +543,7 @@ fn main()
         .family("Segoe UI")
         .weight(500)
         .build(&mut font)
-	.unwrap()
+    .unwrap()
     ;
     _ = nwg::Font::set_global_default(Some(font));
     /*==========DIV==============*/
@@ -425,7 +617,16 @@ fn main()
                  .readonly(true)
                  .flags(nwg::TextBoxFlags::VISIBLE)
                  .parent(&div_output)
-                 .build(&mut field_output)
+                 .build(&mut textbox_chat)
+                 .unwrap()
+    ;
+
+    nwg::TextBox::builder()
+                 .text("")
+                 .readonly(true)
+                 .flags(nwg::TextBoxFlags::VISIBLE)
+                 .parent(&div_state_col)
+                 .build(&mut textbox_package)
                  .unwrap()
     ;
 
@@ -443,7 +644,7 @@ fn main()
                  .h_align(nwg::HTextAlign::Center)              
                  .text("State")
                  .parent(&div_state)
-                 .build(&mut label_state)
+         .build(&mut label_state)
                  .unwrap()
     ;
 
@@ -454,7 +655,16 @@ fn main()
                  .build(&mut label_settings)
                  .unwrap()
     ;
-                
+
+
+    nwg::Label::builder()
+                 .h_align(nwg::HTextAlign::Center)              
+                 .text("Package structure (hex):")
+                 .parent(&div_state_col)
+                 .build(&mut label_package)
+                 .unwrap()
+    ;
+        
     nwg::Label::builder()
                  .h_align(nwg::HTextAlign::Center)              
                  .text(TAG_SENT)
@@ -569,6 +779,7 @@ fn main()
                     .unwrap()
     ;
 
+
     nwg::FlexboxLayout::builder()
                     .parent(&div_state_col)
                     .flex_direction(stretch::style::FlexDirection::Column)
@@ -576,7 +787,12 @@ fn main()
                     .child(&label_sent)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
                     .child(&text_packages_sent)
-                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.2) })
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.3) })
+                    .child(&text_packages_sent)
+                    .child(&label_package)
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.1) })
+                    .child(&textbox_package)
+                    .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(0.4) })
                     .build(&layout_state_col)
                     .unwrap()
     ;
@@ -589,6 +805,7 @@ fn main()
                     .build(&layout_state_row)
                     .unwrap()
     ;
+
 
 
     nwg::FlexboxLayout::builder()
@@ -610,7 +827,7 @@ fn main()
                     .flex_direction(stretch::style::FlexDirection::Column)
                     .child(&label_output)
                     .child_size( Size{ width: Dimension::Percent(1.0), height: Dimension::Percent(0.1) })
-                    .child(&field_output)
+                    .child(&textbox_chat)
                     .child_size( Size{ width: Dimension::Percent(0.9), height: Dimension::Percent(1.0) })
                     .auto_spacing(Some(15))
                     .build(&layout_output)
@@ -714,11 +931,11 @@ fn main()
                         Some(ref name) => 
                         {
                             ddlist_w.push(name.clone());
-			    ddlist_w.sort();
+                ddlist_w.sort();
                             ddlist_w.set_selection_string(&name);
- 			}, 
-		        _ => {},
-		    }
+            }, 
+                _ => {},
+            }
 
                 }
                 if &handle == &button_settings_r
@@ -784,11 +1001,12 @@ fn main()
                     {
                         let mut msg_type = 'M';
                         let text = &String::from_utf8(bytes.to_vec()).expect("Our bytes should be valid utf8");
-			if text.starts_with(TAG_WRITE) { msg_type = 'W'; }
+                        if text.starts_with(TAG_WRITE) { msg_type = 'W'; }
                         if text.starts_with(TAG_READ) { msg_type = 'R'; }
                         if text.starts_with(TAG_SETTINGS) { msg_type = 'S'; }
                         if text.starts_with(TAG_WRITE_SUCCESS) { msg_type = 'w'; }
                         if text.starts_with(TAG_ERR) == true { msg_type = 'E'; }
+                        if text.starts_with(TAG_PACKAGE) == true { msg_type = 'P'; }
                         match msg_type
                         {
                             'W' =>
@@ -798,14 +1016,14 @@ fn main()
                                 match ddlist_r.collection().iter().position(|r| *r == p_w_name)
                                 {
                                     Some(idx) => { index = idx; },
-				    _ => {},
+                    _ => {},
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
                                 
                                 let name_next = next_port(p_w_name);
                                 match ddlist_r.collection().iter().position(|r| *r == name_next)
                                 {
-				    Some(idx) => { index = idx; }
+                    Some(idx) => { index = idx; }
                                     _ => { index = usize::MAX; },
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
@@ -814,7 +1032,9 @@ fn main()
                             'w' =>
                             {
                                 field_input.clear();
-                                text_packages_sent.set_text((text_packages_sent.text().parse::<i32>().unwrap() + 1).to_string().as_str());
+                                let (_, amt_str) = text.split_at(TAG_WRITE_SUCCESS.len());
+                                let amt = amt_str.parse::<i32>().unwrap();
+                                text_packages_sent.set_text((text_packages_sent.text().parse::<i32>().unwrap() + amt).to_string().as_str());
 
                             },
                             'R' =>
@@ -853,8 +1073,22 @@ fn main()
                                     err_msg
                                 );
                             },
+                            'P' =>
+                            {
+                                textbox_package.clear();
+                                let (_, pkg) = text.split_at(TAG_PACKAGE.len());
+                                textbox_package.append(&pkg);                            
+                            }
                             _ =>
-                            { field_output.set_text(&text); },
+                            {
+                                let unpacked = unpack((*text).clone());
+                                textbox_chat.clear();
+
+                                for package in unpacked
+                                {
+                                    textbox_chat.append(&package);
+                                }
+                            },
                         }
                     },
                     _ => 
@@ -863,6 +1097,15 @@ fn main()
                 }      
             },
         }
+        match field_input.text().find(|c| c as i32 == 13 || c as i32 == 10)
+        {
+            Some(idx) => 
+            {
+                let mut str = field_input.text();
+                str.remove(idx);
+                field_input.set_text(&str);
+            }, _ => {},
+        }  
     });                                               
     nwg::dispatch_thread_events();
     nwg::unbind_event_handler(&handler);
