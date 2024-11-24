@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 use std::io::Write;
+use serialport::new;
 use string_builder:: Builder;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use stretch::style::Dimension;
@@ -30,35 +31,154 @@ static CONST_N   : usize  = 14;
 static PACKAGE_FLAG_REPLACER : &str = "\n?"; 
 
 
-static POW2     : [u8; 8] = [128,64,32,16,8,4,2,1];
+static POW2         : [u8; 8]   = [128,64,32,16,8,4,2,1];
+static POLYNOMIALS  : [&str; 8] = ["0","1","111","1011","10011","100101","100011","10001001"];
 
-fn calc_hamming(str: &str) 
--> u8
+
+fn calc_log(size: i32) 
+-> i32
+{  (size as f32 + 1. + (size as f32 + 1.).log2().ceil()).log2().ceil() as i32 }
+
+fn divide_polynoms(rm: &str, divisor: &str)
+->u8
 {
-    let mut res : u8 = 0;
-    let n = str.len();
-    for char_index in 0..n
-    {
-        let idx : u8 = (char_index * 8).try_into().unwrap();
-        let c = str.chars().nth(char_index).unwrap() as u8;
-        for bit_pos in 0..8
-        {    
-            for pow_pos in 0..8
-            {
-                if (idx + bit_pos + 1) & POW2[pow_pos] > 0
-                {
-                    let us_bit_pos = usize::from(bit_pos);                    
-                    let us_pow_pos = usize::from(pow_pos);
-                    if (c & POW2[us_bit_pos]) > 0
-                    {
-                        res = res ^ POW2[us_pow_pos];
-                    }
-                }
+    let mut remainder = rm.to_string();
+
+    // Деление
+    let divisor_len = divisor.len();
+    let remainder_len = remainder.len();
+    for i in 0..=remainder_len - divisor_len {
+        if remainder.chars().nth(i).unwrap() == '1' {
+            // Выполняем XOR с делителем
+            for j in 0..divisor_len {
+                let r_char = remainder.chars().nth(i + j).unwrap();
+                let d_char = divisor.chars().nth(j).unwrap();
+                remainder.replace_range(i + j..i + j + 1, if r_char == d_char { "0" } else { "1" });
             }
         }
-
     }
-    res
+    
+    // Вырезаем остаток (последние bits)
+    let result_bits = &remainder[remainder_len - divisor_len + 1..];
+    
+    //println!("result: {}", result_bits);
+    // Преобразуем остаток в u8
+    let mut remainder_value = 0u8;
+    for (i, bit) in result_bits.chars().rev().enumerate() {
+        if bit == '1' {
+            remainder_value |= 1 << i;
+        }
+    }
+    //println!("remainder_value:{}", remainder_value);
+    return remainder_value;
+}
+
+fn polynomial_division(input: &str) -> u8 {
+    let mut s = String::default();
+    for c in input.chars()
+    {
+        for p in POW2
+        {
+            s.push(if (c as u8) & p > 0 { '1' }else{ '0' }); 
+        }
+    }
+    // Полином делителя (например, x^4 + x + 1)
+    let ctrl_bits = calc_log(s.len().try_into().unwrap()) as u8;
+
+    let divisor = POLYNOMIALS.get(usize::from(ctrl_bits)).unwrap();
+    
+    //println!("divisible: {}", s);
+    //println!("divisor: {}", divisor);
+    // Начальный остаток - входная строка и нули для длины делимого
+    
+    return divide_polynoms(&s, &divisor);
+}
+
+fn check_correct_on_receive(data: &str, fcs: &str)
+-> String
+{
+    let ctrl_bits = calc_log(data.len().try_into().unwrap()) as u8;
+    let divisor = POLYNOMIALS.get(usize::from(ctrl_bits)).unwrap();
+
+    let mut rm : u8 = fcs.chars().next().unwrap() as u8;
+
+
+    let mut s = String::new();
+
+    for c in data.chars()
+    {
+        for p in POW2
+        {
+            s.push(if (c as u8) & p > 0 { '1' }else{ '0' }); 
+        }
+    }
+
+    for _ in 0..8-ctrl_bits
+    { 
+       // println!("rm: {}", rm);
+        rm = rm << 1;
+    }    
+       // println!("rm after shifting: {}", rm);
+    for _ in 0..ctrl_bits 
+    {  
+        if rm & POW2[0] != 0u8 {s.push('1');}
+        else{                   s.push('0');}
+
+        rm = rm << 1;
+    }
+//    println!("s:{}", s);
+
+    //println!("data + fcs: {}", s);
+    //println!("divisor: {}", divisor.to_string());
+
+    let s_len = s.len();
+    for i in 0..s_len
+    {
+       println!("----------------------"); 
+        let error_flag = divide_polynoms(&s, divisor);
+        if error_flag == 0u8 && i == 0 { return data.to_owned(); }
+        let mut amt = 0;
+        for p in POW2 { if error_flag & p != 0u8 { amt = amt + 1; } }
+        println!("i = {}", i);
+        println!("s = {}", s);
+        println!("errflag = {:#b}", error_flag);
+        println!("amt of 1s in error: {}", amt);
+        if amt == 1 || amt == 0
+        {
+               for j in 0..8
+               {
+                    if error_flag & POW2[usize::try_from(j).unwrap()] != 0u8
+                    {
+                        let s_pos = s_len - 1 - usize::try_from(7 - j).unwrap();
+                        let c = s.chars().nth(s_pos).unwrap();
+                        println!("{}:{}", s_pos, c);
+                        s = replace_nth_char_safe(&s, s_pos, if c == '0' {'1'} else {'0'});
+                        println!("s replaced: {}", s);
+                    }
+               } 
+               for _ in 0..i
+               {
+                    let c = s.remove(0);
+                    s.push(c);
+               }
+               println!("s shifted back: {}", s);
+                let (new_data, _) = s.split_at(s.len() - usize::try_from(ctrl_bits).unwrap());
+                let mut result = String::new();
+                for chunk in new_data.as_bytes().chunks(8) {
+                    // Преобразуем текущий кусок в строку
+                    let byte_str = std::str::from_utf8(chunk).map_err(|_| "Ошибка UTF-8").unwrap();
+                    // Преобразуем двоичную строку в число u8
+                    let byte = u8::from_str_radix(byte_str, 2).map_err(|_| "Ошибка преобразования").unwrap();
+                    // Преобразуем u8 в char и добавляем в результат
+                    result.push(byte as char);
+                }
+                println!("result:{}", result);
+                return result.to_owned();
+        }
+        let last = s.pop().unwrap();
+        s = format!("{}{}", last, s);
+    }
+    return String::new();
 }
 
 fn replace_nth_char_safe(s: &str, idx: usize, newchar: char) -> String {
@@ -73,12 +193,10 @@ fn implement_error(s: & mut str)
     if num < 40
     {
         let num : usize = rand::thread_rng().gen_range(0..str.len());
-        let sh : u8 = rand::thread_rng().gen_range(0..8);
-        let c = str.chars().nth(num).unwrap();
-        let mut u = c as u8;
-        u = u ^ (u & POW2[usize::from(sh)]);    
-        println!("{}/{}", c, char::from(u));
-        str = replace_nth_char_safe(&str, num, char::from(u));
+        let mut newchar = str.chars().nth(num).unwrap();
+        let bitnum = rand::thread_rng().gen_range(0..8);
+        newchar = char::from(newchar as u8 ^ (newchar as u8 & POW2[bitnum]));
+        str = replace_nth_char_safe(&str, num, newchar);
     }
     return str;
 }
@@ -97,7 +215,8 @@ fn pack_single
     frame.push('\0');
     frame.push(char::from_u32(port_num).expect("INVALID PORT NUMBER"));     /* should match */
     frame.push_str(&implement_error(& mut s));
-    frame.push(char::from(calc_hamming(&data)));
+    //frame.push('\0');
+    frame.push(polynomial_division(&data) as char);
     return frame;
 }
 
@@ -142,6 +261,12 @@ fn unpack_single
     let (_dest_and_src, rest_data)   = package.split_at(2);
     let (data_str, _fcs)             = rest_data.split_at(rest_data.len() - 1);
     let data = data_str.replace(PACKAGE_FLAG_REPLACER, PACKAGE_FLAG);
+    println!("fcs: {:#b}, calc: {:#b}", _fcs.chars().next().unwrap() as u32, polynomial_division(&data));
+    println!("validity check: {}", check_correct_on_receive(&data, _fcs));
+    if _fcs.chars().next().unwrap() as u32 != polynomial_division(&data) as u32
+    {
+        //println!("ERROR: error in data");
+    }
     return data;
 }
 
@@ -151,7 +276,7 @@ fn unpack
 ) 
 -> Vec<String>
 {
-    if package.len() < CONST_N + 5
+    if package.len() < 6
     {
         return Vec::new();
     }
@@ -168,8 +293,6 @@ fn unpack
     return data;
 }
 
-
-                    
 fn get_avail_ports() -> Vec<String>
 {
     let mut avail_ports = serialport::available_ports();
@@ -320,14 +443,22 @@ fn port_worker(
         {
             Some(ref mut port) =>
             {
-                if port.bytes_to_read().unwrap() > 0
+                match port.bytes_to_read()
                 {
-                    let mut serial_buf = vec![0; 1024];
-                    match port.read(serial_buf.as_mut_slice())
+                    Ok(t) =>
                     {
-                        Ok(_) => { _ = tx.send(serial_buf); },
-                        _ =>     { send_error(&tx, "ERROR: failed to read"); },
-                    }
+                        if t != 0
+                        {
+                        ////println!("{}", t);
+                            let mut serial_buf = vec![0; usize::try_from(t).expect("fuck") ];
+                            match port.read(serial_buf.as_mut_slice())
+                            {
+                                Ok(_) => { _  = tx.send(serial_buf); },
+                                _ =>     { send_error(&tx, "ERROR: failed to read"); },
+                            }
+                        }
+                    },
+                    _ => {},
                 }
             },
             _ => {},
@@ -463,7 +594,7 @@ fn port_worker(
 }
 
 
-fn print_binary(name: String)
+fn _print_binary(name: String)
 {
     let mut name_in_binary = "".to_string();
 
@@ -476,8 +607,14 @@ fn print_binary(name: String)
 }
 
 fn main()
-{ 
+{
+    let data = "Abc";
+    let mut fcs = String::new();
+    fcs.push(char::from(1));
 
+    check_correct_on_receive(&data, &fcs);
+
+    return;
     nwg::init().expect("Failed to init Native Windows GUI");
     nwg::Font::set_global_family("Segoe UI").expect("Failed to set default font");
 
@@ -1085,11 +1222,13 @@ fn main()
                             }
                             _ =>
                             {
-                                let unpacked = unpack((*text).clone());
+                                let unpacked = unpack((text).clone());
                                 textbox_chat.clear();
 
+                                ////println!("packages:");
                                 for package in unpacked
                                 {
+                                    ////println!("package:{}", package);
                                     textbox_chat.append(&package);
                                 }
                             },

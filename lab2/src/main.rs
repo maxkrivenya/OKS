@@ -37,11 +37,16 @@ fn pack_single
 {
     let mut frame : String = Default::default();
     frame.push(PACKAGE_FLAG_1);
-    frame.push(PACKAGE_FLAG_2);       
-    frame.push('\0');
-    frame.push(char::from_u32(port_num).expect("INVALID PORT NUMBER"));     /* should match */
-    frame.push_str(&data);
-    frame.push('\0');
+    frame.push(PACKAGE_FLAG_2);   
+
+    let mut stuffing : String = Default::default();
+    stuffing.push('\0');
+    stuffing.push(char::from_u32(port_num).expect("INVALID PORT NUMBER"));     /* should match */
+    stuffing.push_str(&data);
+    stuffing.push('\0');
+    stuffing = stuffing.replace(PACKAGE_FLAG, PACKAGE_FLAG_REPLACER);
+
+    frame.push_str(&stuffing);
     return frame;
 }
 
@@ -51,9 +56,9 @@ fn pack(
 ) -> (String, i32, String)
 {
 
-    let replaced = &data.replace(PACKAGE_FLAG, PACKAGE_FLAG_REPLACER);
     use std::str;
-    let subs = replaced.as_bytes()
+    
+    let subs = data.as_bytes()
         .chunks(CONST_N)
         .map(str::from_utf8)
         .collect::<Result<Vec<&str>, _>>()
@@ -68,7 +73,7 @@ fn pack(
         amt = amt + 1;
         package = pack_single(chunk, port_num);
         bld.append(package.clone());
-    }
+    }                                                                        
     let res = bld.string().unwrap();
     return (res, amt, package);
 }
@@ -83,10 +88,10 @@ fn unpack_single
     {
         return String::new();
     }
+    let package = package.replace(PACKAGE_FLAG_REPLACER, PACKAGE_FLAG);
     let (_dest_and_src, rest_data)   = package.split_at(2);
     let (data_str, _fcs)             = rest_data.split_at(rest_data.len() - 1);
-    let data = data_str.replace(PACKAGE_FLAG_REPLACER, PACKAGE_FLAG);
-    return data;
+    return data_str.to_string();
 }
 
 fn unpack
@@ -379,7 +384,7 @@ fn port_worker(
                                                                             .map(|chunk| chunk.iter().collect::<String>()) // Collect each chunk back into a String
                                                                             .collect::<Vec<_>>() // Collect all the chunks into a vector
                                                                             .join(" ") // Join the chunks with a space
-				;
+                ;
                                 let hex_replaced = hex.replace("0a 3f", "[0a 3f]");
 
                                 _ = tx.send((TAG_PACKAGE.to_string() + &hex_replaced).as_bytes().to_vec());
@@ -477,7 +482,7 @@ fn main()
         .family("Segoe UI")
         .weight(500)
         .build(&mut font)
-	.unwrap()
+    .unwrap()
     ;
     _ = nwg::Font::set_global_default(Some(font));
     /*==========DIV==============*/
@@ -578,7 +583,7 @@ fn main()
                  .h_align(nwg::HTextAlign::Center)              
                  .text("State")
                  .parent(&div_state)
-		 .build(&mut label_state)
+         .build(&mut label_state)
                  .unwrap()
     ;
 
@@ -865,11 +870,11 @@ fn main()
                         Some(ref name) => 
                         {
                             ddlist_w.push(name.clone());
-			    ddlist_w.sort();
+                ddlist_w.sort();
                             ddlist_w.set_selection_string(&name);
- 			}, 
-		        _ => {},
-		    }
+            }, 
+                _ => {},
+            }
 
                 }
                 if &handle == &button_settings_r
@@ -950,14 +955,14 @@ fn main()
                                 match ddlist_r.collection().iter().position(|r| *r == p_w_name)
                                 {
                                     Some(idx) => { index = idx; },
-				    _ => {},
+                    _ => {},
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
                                 
                                 let name_next = next_port(p_w_name);
                                 match ddlist_r.collection().iter().position(|r| *r == name_next)
                                 {
-				    Some(idx) => { index = idx; }
+                    Some(idx) => { index = idx; }
                                     _ => { index = usize::MAX; },
                                 }
                                 if index != usize::MAX { ddlist_r.remove(index); }
